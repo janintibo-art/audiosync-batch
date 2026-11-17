@@ -1,4 +1,4 @@
-"""AudioSync Batch v3 - batch diagnostics and conservative sync suggestions."""
+"""AudioSync Batch v4 - season presets, validated tests and batch remux."""
 import json
 import csv
 import re
@@ -37,6 +37,26 @@ def probe(path):
     if result.returncode:
         raise RuntimeError(result.stderr.strip()[-300:])
     return json.loads(result.stdout)
+
+
+def season_key(path):
+    """Extract S01 etc. from common episode filenames; never guess unknown seasons."""
+    match = re.search(r'(?i)(?<![a-z0-9])S(\d{1,2})[ ._-]*E\d{1,3}(?!\d)', Path(path).stem)
+    if not match:
+        match = re.search(r'(?i)(?<![a-z0-9])(?:saison|season)[ ._-]*(\d{1,2})(?!\d)', str(path))
+    return f'S{int(match.group(1)):02d}' if match else 'Sans saison'
+
+
+def target_path(outdir, src, suffix, season=None):
+    """Never overwrite another source whose stem is the same."""
+    subgroup = outdir / (season or season_key(src))
+    subgroup.mkdir(parents=True, exist_ok=True)
+    candidate = subgroup / f'{src.stem}{suffix}.mkv'
+    index = 2
+    while candidate.exists() or candidate.resolve() == src.resolve():
+        candidate = subgroup / f'{src.stem}{suffix}_{index}.mkv'
+        index += 1
+    return candidate
 
 
 def stream_label(s):
@@ -144,7 +164,7 @@ def diagnostic_analysis(path, info):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('AudioSync Batch • V3 - Diagnostic')
+        root.title('AudioSync Batch • V4 - Correction par saison')
         root.geometry('1120x820')
         root.minsize(780, 610)
         self.files = []
@@ -155,7 +175,10 @@ class App:
         self.stop = threading.Event()
         self.busy = False
         self.proc = None
-        self.offset = tk.StringVar(value='20000')
+        self.offset = tk.StringVar(value='8700')
+        self.season = tk.StringVar(value='S01')
+        self.preset_ms = {'S01': 8700}
+        self.season_status = tk.StringVar(value='S01 : +8700 ms mesurés dans VLC ; autres saisons non vérifiées.')
         self.direction = tk.StringVar(value='delay')
         self.dest = tk.StringVar(value=str(Path.home() / 'Videos' / 'AudioSync_Corrigees'))
         self.recursive = tk.BooleanVar(value=True)
@@ -182,7 +205,7 @@ class App:
         style.configure('Treeview.Heading', font=('Segoe UI', 10, 'bold'))
         main = ttk.Frame(self.root, padding=14)
         main.pack(fill='both', expand=True)
-        ttk.Label(main, text='◉ AudioSync Batch', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(main, text='◉ AudioSync Batch V4', style='Title.TLabel').pack(anchor='w')
         ttk.Label(main, text='Analyse des pistes • Décalage en lot • Copie sans réencodage • Originaux préservés').pack(anchor='w', pady=(0, 8))
         bar = ttk.Frame(main)
         bar.pack(fill='x')
@@ -196,12 +219,14 @@ class App:
         ttk.Label(main, text='Fichiers source').pack(anchor='w', pady=(12, 3))
         file_frame = ttk.Frame(main)
         file_frame.pack(fill='both', expand=True)
-        self.files_view = ttk.Treeview(file_frame, columns=('container', 'count', 'analysis'), show='tree headings', height=7)
+        self.files_view = ttk.Treeview(file_frame, columns=('season', 'container', 'count', 'analysis'), show='tree headings', height=7)
         self.files_view.heading('#0', text='Nom du fichier')
+        self.files_view.heading('season', text='Saison')
         self.files_view.heading('container', text='Conteneur')
         self.files_view.heading('count', text='Pistes')
         self.files_view.heading('analysis', text='Diagnostic')
-        self.files_view.column('#0', width=520)
+        self.files_view.column('#0', width=435)
+        self.files_view.column('season', width=83, anchor='center')
         self.files_view.column('container', width=130)
         self.files_view.column('count', width=90, anchor='center')
         self.files_view.column('analysis', width=215)
@@ -224,6 +249,14 @@ class App:
         self.tracks.configure(yscrollcommand=sb2.set)
         self.tracks.bind('<Double-1>', self.toggle_track)
         ttk.Label(main, textvariable=self.diagnostic, wraplength=980).pack(anchor='w', pady=(8, 6))
+        seasonbar = ttk.Frame(main)
+        seasonbar.pack(fill='x', pady=(4, 2))
+        ttk.Label(seasonbar, text='Saison à traiter :').pack(side='left')
+        self.season_picker = ttk.Combobox(seasonbar, textvariable=self.season, state='readonly', width=17, values=['S01'])
+        self.season_picker.pack(side='left', padx=8)
+        self.season_picker.bind('<<ComboboxSelected>>', self.on_season_change)
+        ttk.Button(seasonbar, text='Enregistrer le réglage pour cette saison', command=self.save_preset).pack(side='left', padx=6)
+        ttk.Label(main, textvariable=self.season_status, wraplength=950).pack(anchor='w')
         config = ttk.Frame(main)
         config.pack(fill='x', pady=5)
         ttk.Label(config, text='Décalage :').pack(side='left')
@@ -241,17 +274,58 @@ class App:
         ttk.Button(output, text='Parcourir', command=self.choose_output).pack(side='left')
         actions = ttk.Frame(main)
         actions.pack(fill='x', pady=8)
-        self.test_btn = ttk.Button(actions, text='Créer un extrait test (15 s)', command=self.test)
+        self.test_btn = ttk.Button(actions, text='Créer un extrait test (30 s)', command=self.test)
         self.test_btn.pack(side='left', padx=(0, 8))
-        self.run_btn = ttk.Button(actions, text='Corriger toutes les vidéos', command=self.start)
+        self.run_btn = ttk.Button(actions, text='Corriger la saison sélectionnée', command=self.start)
         self.run_btn.pack(side='left', padx=(0, 8))
         self.cancel_btn = ttk.Button(actions, text='Arrêter', command=self.cancel, state='disabled')
         self.cancel_btn.pack(side='left')
         self.progress = ttk.Progressbar(main, mode='determinate')
         self.progress.pack(fill='x', pady=(4, 4))
         ttk.Label(main, textvariable=self.status, wraplength=970).pack(anchor='w')
-        ttk.Label(main, text='Analyse automatique des anomalies techniques ; aucun décalage de paroles n’est inventé. Pour une correction, vérifier un extrait avant le lot.',
+        ttk.Label(main, text='V4 : décalage +8,7 s validé pour S01 seulement. Les saisons non mesurées ne sont jamais corrigées automatiquement. Un test de lecture reste nécessaire.',
                   wraplength=970).pack(anchor='w', pady=(5, 0))
+
+    def update_seasons(self):
+        seasons = sorted({season_key(p) for p in self.files})
+        self.season_picker['values'] = seasons
+        if seasons and self.season.get() not in seasons:
+            self.season.set(seasons[0])
+        if seasons:
+            self.on_season_change()
+        else:
+            self.season_status.set('Importez des épisodes pour afficher les saisons.')
+
+    def on_season_change(self, _event=None):
+        key = self.season.get()
+        if key in self.preset_ms:
+            signed = self.preset_ms[key]
+            self.offset.set(str(abs(signed)))
+            self.direction.set('delay' if signed >= 0 else 'advance')
+            self.season_status.set(f'{key} : réglage enregistré {signed:+d} ms. Vérifiez un extrait avant de corriger.')
+        else:
+            self.offset.set('0')
+            self.direction.set('delay')
+            self.season_status.set(f'{key} : décalage inconnu, aucune correction automatique. Mesurez et enregistrez une valeur.')
+
+    def save_preset(self):
+        key = self.season.get()
+        if not key:
+            messagebox.showwarning('Saison', 'Choisissez une saison.')
+            return
+        try:
+            offset = int(self.offset.get().strip())
+            if not 0 <= offset <= 600000:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror('Erreur', 'Décalage non valide (0 à 600000 ms).')
+            return
+        value = offset if self.direction.get() == 'delay' else -offset
+        self.preset_ms[key] = value
+        self.season_status.set(f'{key} : {value:+d} ms enregistré pour cette session. Testez un extrait avant le lot.')
+
+    def season_files(self):
+        return [p for p in self.files if season_key(p) == self.season.get()]
 
     def add(self, paths):
         known = set(self.files)
@@ -261,7 +335,8 @@ class App:
                 continue
             known.add(p)
             self.files.append(p)
-            self.files_view.insert('', 'end', iid=str(p), text=p.name, values=(p.suffix.upper().lstrip('.'), 'À analyser', 'Non analysé'))
+            self.files_view.insert('', 'end', iid=str(p), text=p.name, values=(season_key(p), p.suffix.upper().lstrip('.'), 'À analyser', 'Non analysé'))
+        self.update_seasons()
         self.status.set(f'{len(self.files)} vidéo(s) chargée(s).')
         if self.files and not self.files_view.selection():
             self.files_view.selection_set(str(self.files[0]))
@@ -285,6 +360,7 @@ class App:
         self.files_view.delete(*self.files_view.get_children())
         self.tracks.delete(*self.tracks.get_children())
         self.diagnostic.set('Sélectionnez un fichier pour analyser ses horodatages.')
+        self.update_seasons()
         self.status.set('Liste vidée.')
 
     def choose_output(self):
@@ -373,7 +449,7 @@ class App:
         if not self.reports:
             messagebox.showinfo('Rapport vide', 'Lancez « Analyser toutes les vidéos » avant export.')
             return
-        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')], initialfile='audiosync_diagnostic_v3.csv')
+        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')], initialfile='audiosync_diagnostic_v4.csv')
         if not path:
             return
         fields = ['name', 'path', 'status', 'confidence', 'suggestion_ms', 'difference_s',
@@ -428,7 +504,12 @@ class App:
         settings = self.settings()
         if settings is None:
             return
-        src = self.selected_file() or self.files[0]
+        matches = self.season_files()
+        if not matches:
+            messagebox.showwarning('Saison vide', 'Aucune vidéo dans cette saison.')
+            return
+        chosen = self.selected_file()
+        src = chosen if chosen in matches else matches[0]
         self.launch([src], settings[0], preview=True, start=settings[1])
 
     def start(self):
@@ -436,8 +517,16 @@ class App:
         if settings is None:
             return
         offset = settings[0]
-        if messagebox.askyesno('Confirmer', f'Corriger {len(self.files)} vidéos avec {offset:+d} ms ?\nOriginales préservées ; sortie MKV sans réencodage.'):
-            self.launch(list(self.files), offset)
+        current = self.season.get()
+        matches = self.season_files()
+        if not matches:
+            messagebox.showwarning('Saison vide', 'Aucune vidéo pour cette saison.')
+            return
+        if current not in self.preset_ms or self.preset_ms[current] != offset:
+            messagebox.showwarning('Réglage non enregistré', 'Enregistrez le réglage de cette saison avant le traitement complet.')
+            return
+        if messagebox.askyesno('Confirmer la correction', f'Saison : {current}\nÉpisodes : {len(matches)}\nRetard audio : {offset:+d} ms\n\nAvez-vous vérifié un extrait test ?\nOriginaux préservés ; sortie MKV sans réencodage.'):
+            self.launch(matches, offset)
 
     def launch(self, files, offset, preview=False, start=0):
         self.busy = True
@@ -472,14 +561,10 @@ class App:
                     if not any(s.get('codec_type') == 'video' for s in streams):
                         raise ValueError('Aucune piste vidéo sélectionnée.')
                     suffix = '_test_sync' if preview else '_synchronise'
-                    dest = outdir / f'{p.stem}{suffix}.mkv'
-                    k = 2
-                    while dest.exists() or dest.resolve() == p.resolve():
-                        dest = outdir / f'{p.stem}{suffix}_{k}.mkv'
-                        k += 1
+                    dest = target_path(outdir, p, suffix)
                     tmp = dest.with_name(dest.stem + '.part.mkv')
                     self.events.put(('status', f'{no}/{len(files)} : {p.name}'))
-                    cmd = make_command(p, tmp, offset, streams, start if preview else None, 15 if preview else None)
+                    cmd = make_command(p, tmp, offset, streams, start if preview else None, 30 if preview else None)
                     self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
                                                  encoding='utf-8', errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     _, err = self.proc.communicate()

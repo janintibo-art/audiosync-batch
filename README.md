@@ -1,17 +1,32 @@
-# AudioSync Batch V3 — Diagnostic par lot
+# AudioSync Batch V4 — Correction audio par saison
 
-## Ajouts
+## Principales améliorations
 
-- Bouton **Analyser toutes les vidéos** : inventaire des pistes et comparaison des horodatages de début.
-- Comparaison des durées des pistes audio et vidéo, recherche de silence audio initial dans les 60 premières secondes via FFmpeg.
-- Diagnostic affiché dans la liste pour chaque fichier, détail au clic, et export CSV avec les observations.
-- Détection des pistes audio multiples ; aucune correction automatique sans preuve.
-- Fonctions V2 préservées : sélection des pistes, test MKV de 15 secondes, retard/avance manuels, correction par lots sans réencodage.
+- Détection des saisons dans les noms d'épisodes de type `S01E01` et `Season 2` / `Saison 2`.
+- Préréglage **S01 : retard audio +8700 ms**, issu du test manuel réalisé dans VLC. Il s'agit d'une mesure de l'utilisateur, **pas** d'un résultat de l'analyse automatique.
+- Les autres saisons n'ont **aucun réglage automatique** : les mesurer puis cliquer sur « Enregistrer le réglage pour cette saison ».
+- Bouton « Corriger la saison sélectionnée » : ne traite pas les autres saisons par erreur.
+- Export MKV vers un **sous-dossier par saison**, préservation des originaux, des sous-titres et des pistes sélectionnées. Copie des flux (`-c copy`), sans réencodage.
+- Extrait test de 30 s pour inspection avant conversion du lot.
+- Diagnostic des horodatages et analyse des premiers silences déjà présents en V3.
 
-## Limite essentielle
+## Important pour le test
 
-La différence entre les premiers horodatages audio/vidéo **ne prouve pas** la synchronisation des dialogues. Le silence non plus. Cette version **n'invente donc pas** un décalage automatiquement. Une analyse du mouvement des lèvres couplée à la voix nécessitera un module de synchronisation audiovisuelle spécifique avec tests de fiabilité, et peut échouer pour les animés, hors-champ, doublages ou scènes sans dialogue. Un décalage variable exige une approche différente.
+Avec +8700 ms, le début du fichier corrigé peut être silencieux environ 8,7 s : la piste audio est volontairement retardée sur la chronologie. Évaluer la synchronisation **sur un dialogue après ce délai** et lors des sauts de lecture. Le lecteur VLC doit avoir son réglage manuel remis à **0,000 s** lors du contrôle du fichier corrigé.
 
-## Installation et compilation
+Un blanc après déplacement dans VLC n'est pas à lui seul une preuve de fichier corrompu. La V4 ne fournit pas de mesure automatique de synchronisation labiale; les horodatages et silences ne permettent pas de la calculer avec certitude. Un décalage variable ne pourra pas être corrigé avec une seule valeur constante.
 
-Fournir `ffmpeg.exe` et `ffprobe.exe` à côté de `AudioSync-Batch.exe` (ou dans PATH). Documentation : https://ffmpeg.org/download.html. GitHub Actions compile l'application Windows (Python 3.12 + PyInstaller) et publie l'artefact EXE. Aucune vidéo originale n'est modifiée.
+## Windows
+
+L'action GitHub produit `AudioSync-Batch-Windows-v4` contenant `AudioSync-Batch.exe`.
+Installer FFmpeg et FFprobe ou placer `ffmpeg.exe` et `ffprobe.exe` dans le dossier de l'EXE. Télécharger depuis https://ffmpeg.org/download.html.
+
+## Termux
+
+Depuis le dépôt local existant `~/audiosync_batch`, utiliser le ZIP de mise à jour puis :
+
+`bash ~/memo-depot/mise-a-jour.sh audiosync_batch "AudioSync Batch V4 - correction par saison"`
+
+`gh run watch -R janintibo-art/audiosync-batch`
+
+Le ZIP de mise à jour ne contient que les fichiers modifiés et conserve le dossier racine `audiosync_batch/`.
