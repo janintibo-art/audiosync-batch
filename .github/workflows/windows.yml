@@ -12,11 +12,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Installer PyInstaller
-        run: python -m pip install pyinstaller
+        run: python -m pip install pyinstaller numpy
       - name: Construire EXE
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name AudioSync-Batch app.py
       - name: Publier EXE
         uses: actions/upload-artifact@v4
         with:
-          name: AudioSync-Batch-Windows-v4
+          name: AudioSync-Batch-Windows-v5
           path: dist/AudioSync-Batch.exe

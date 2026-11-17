@@ -1,32 +1,31 @@
-# AudioSync Batch V4 — Correction audio par saison
+# AudioSync Batch V5 — Estimation audiovisuelle expérimentale
 
-## Principales améliorations
+## Nouveautés
 
-- Détection des saisons dans les noms d'épisodes de type `S01E01` et `Season 2` / `Saison 2`.
-- Préréglage **S01 : retard audio +8700 ms**, issu du test manuel réalisé dans VLC. Il s'agit d'une mesure de l'utilisateur, **pas** d'un résultat de l'analyse automatique.
-- Les autres saisons n'ont **aucun réglage automatique** : les mesurer puis cliquer sur « Enregistrer le réglage pour cette saison ».
-- Bouton « Corriger la saison sélectionnée » : ne traite pas les autres saisons par erreur.
-- Export MKV vers un **sous-dossier par saison**, préservation des originaux, des sous-titres et des pistes sélectionnées. Copie des flux (`-c copy`), sans réencodage.
-- Extrait test de 30 s pour inspection avant conversion du lot.
-- Diagnostic des horodatages et analyse des premiers silences déjà présents en V3.
+- Bouton **Estimer décalage image/son** pour l’épisode sélectionné : analyse jusqu’à 90 secondes en basse définition avec FFmpeg et NumPy.
+- Corrélation des changements d’images avec les attaques sonores ; contrôle de cohérence entre les deux moitiés analysées.
+- Si aucun pic cohérent : **Indéterminé**, sans suggestion de correction.
+- Si un pic cohérent apparaît : **Piste expérimentale**, indiquée en millisecondes avec un score non probabiliste.
+- Bouton **Copier la suggestion** pour tester un extrait ; **aucun enregistrement de saison ni conversion automatique**.
+- Les préréglages et la correction par saison de la V4 sont conservés : **S01 +8700 ms** mesurés dans VLC, autres saisons à vérifier.
+- Fichiers originaux conservés, sortie MKV, vidéo copiée sans réencodage, sous-titres préservés.
 
-## Important pour le test
+## Limites essentielles
 
-Avec +8700 ms, le début du fichier corrigé peut être silencieux environ 8,7 s : la piste audio est volontairement retardée sur la chronologie. Évaluer la synchronisation **sur un dialogue après ce délai** et lors des sauts de lecture. Le lecteur VLC doit avoir son réglage manuel remis à **0,000 s** lors du contrôle du fichier corrigé.
+**Ce n’est PAS une analyse des mouvements des lèvres.** Une piste sonore doublée, un générique musical ou un montage animé peuvent produire de faux indices. Le « score » n’est **pas** un pourcentage de fiabilité. Ne pas corriger une saison sans comparer un extrait test dans VLC avec décalage manuel remis à zéro.
 
-Un blanc après déplacement dans VLC n'est pas à lui seul une preuve de fichier corrompu. La V4 ne fournit pas de mesure automatique de synchronisation labiale; les horodatages et silences ne permettent pas de la calculer avec certitude. Un décalage variable ne pourra pas être corrigé avec une seule valeur constante.
+Une piste « indéterminée » est normale pour de nombreux épisodes. L’analyse technique des horodatages de la V4 demeure distincte de l’estimation audiovisuelle. La V5 n’est pas une détection fiable d’une dérive progressive.
 
-## Windows
+## Windows / GitHub Actions
 
-L'action GitHub produit `AudioSync-Batch-Windows-v4` contenant `AudioSync-Batch.exe`.
-Installer FFmpeg et FFprobe ou placer `ffmpeg.exe` et `ffprobe.exe` dans le dossier de l'EXE. Télécharger depuis https://ffmpeg.org/download.html.
+Le workflow installe PyInstaller et NumPy, puis construit l’artefact `AudioSync-Batch-Windows-v5` avec `AudioSync-Batch.exe`.
 
-## Termux
+**FFmpeg et FFprobe restent nécessaires sur le PC :** installer et ajouter au PATH, ou placer `ffmpeg.exe` et `ffprobe.exe` à côté de `AudioSync-Batch.exe`. Source officielle : https://ffmpeg.org/download.html
 
-Depuis le dépôt local existant `~/audiosync_batch`, utiliser le ZIP de mise à jour puis :
+## Mise à jour depuis Termux
 
-`bash ~/memo-depot/mise-a-jour.sh audiosync_batch "AudioSync Batch V4 - correction par saison"`
+Le ZIP contient uniquement `audiosync_batch/app.py`, `audiosync_batch/README.md` et `audiosync_batch/.github/workflows/windows.yml`.
+
+`bash ~/memo-depot/mise-a-jour.sh audiosync_batch "AudioSync Batch V5 - estimation image son"`
 
 `gh run watch -R janintibo-art/audiosync-batch`
-
-Le ZIP de mise à jour ne contient que les fichiers modifiés et conserve le dossier racine `audiosync_batch/`.

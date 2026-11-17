@@ -1,8 +1,9 @@
-"""AudioSync Batch v4 - season presets, validated tests and batch remux."""
+"""AudioSync Batch v5 - experimental audio/visual synchronization hints."""
 import json
 import csv
 import re
 import statistics
+import math
 import os
 import queue
 import shutil
@@ -161,10 +162,85 @@ def diagnostic_analysis(path, info):
     return result
 
 
+
+def experimental_av_hint(path, *, start=15, duration=90, max_shift=25, fps=8):
+    """Compare audio transients with global frame changes.
+
+    This is NOT a lip-sync model. Music, scene cuts, dubbing and animation can
+    produce a false peak. Never auto-apply its result to a source or season.
+    Positive shift means delay the audio on the output timeline.
+    """
+    import numpy as np
+    ffmpeg = binary('ffmpeg')
+    if not ffmpeg:
+        raise RuntimeError('FFmpeg absent')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    common = [ffmpeg, '-hide_banner', '-nostdin', '-loglevel', 'error',
+              '-ss', str(start), '-t', str(duration), '-i', str(path)]
+    audio_cmd = common + ['-map', '0:a:0', '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', '-']
+    video_cmd = common + ['-map', '0:v:0', '-an', '-vf', f'fps={fps},scale=64:36,format=gray',
+                          '-f', 'rawvideo', '-pix_fmt', 'gray', '-']
+    a = subprocess.run(audio_cmd, capture_output=True, timeout=140, creationflags=flags)
+    if a.returncode:
+        raise RuntimeError('Décodage audio impossible : ' + a.stderr.decode('utf-8', 'replace')[-180:])
+    v = subprocess.run(video_cmd, capture_output=True, timeout=140, creationflags=flags)
+    if v.returncode:
+        raise RuntimeError('Décodage vidéo impossible : ' + v.stderr.decode('utf-8', 'replace')[-180:])
+    window = 8000 // fps
+    samples = np.frombuffer(a.stdout, dtype='<i2')
+    n_audio = len(samples) // window
+    n_video = len(v.stdout) // (64 * 36)
+    n = min(n_audio, n_video)
+    if n < 180:
+        raise ValueError('Pas assez de vidéo/audio exploitable (au moins 23 secondes).')
+    sound = samples[:n * window].astype(np.float32).reshape(n, window)
+    # Energy variations are only a heuristic for acoustic impacts/starts.
+    rms = np.sqrt(np.mean(sound * sound, axis=1) + 1.0)
+    audible = np.maximum(np.diff(np.log1p(rms), prepend=np.log1p(rms[0])), 0)
+    frames = np.frombuffer(v.stdout[:n * 64 * 36], dtype=np.uint8).reshape(n, 36, 64).astype(np.float32)
+    # Trim borders to reduce flashing logos and subtitles interference.
+    changes = np.mean(np.abs(np.diff(frames[:, 4:30, 4:60], axis=0)), axis=(1, 2))
+    motion = np.r_[0.0, changes]
+    if np.std(motion) < 0.45 or np.std(audible) < 0.02:
+        return {'status': 'Indéterminé', 'offset_ms': None, 'score': 0.,
+                'note': 'Pas assez de variations visuelles ou sonores distinctes.'}
+    # Trim outliers and normalize (rare scene cuts should not dominate).
+    def normalized(x):
+        x = np.clip(x, 0, np.percentile(x, 98))
+        return (x - x.mean()) / (x.std() + 1e-6)
+    motion, audible = normalized(motion), normalized(audible)
+    maxlag = min(int(max_shift * fps), n // 3)
+    # Test several windows; agreement is essential before exposing a hint.
+    ranges = [(0, n), (0, n // 2), (n // 2, n)]
+    peaks = []
+    for lo, hi in ranges:
+        scored = []
+        for lag in range(-maxlag, maxlag + 1):
+            # Desired alignment: motion at video time t with sound at t-lag.
+            i0, i1 = max(lo, lag), min(hi, n + lag)
+            if i1 - i0 < 70:
+                continue
+            x, y = motion[i0:i1], audible[i0 - lag:i1 - lag]
+            corr = float(np.mean(x * y))
+            scored.append((corr, lag))
+        if not scored:
+            return {'status': 'Indéterminé', 'offset_ms': None, 'score': 0.,
+                    'note': 'Séquence trop courte pour une analyse fiable.'}
+        peaks.append(max(scored))
+    best_score, best_lag = peaks[0]
+    agreement = all(abs(lag - best_lag) <= fps * 1.5 for _, lag in peaks[1:])
+    if best_score < 0.14 or not agreement or min(score for score, _ in peaks[1:]) < 0.07:
+        return {'status': 'Indéterminé', 'offset_ms': None, 'score': round(best_score, 3),
+                'note': 'Aucun indice cohérent entre les passages. Ne pas utiliser de correction estimée.'}
+    return {'status': 'Piste expérimentale', 'offset_ms': round(best_lag * 1000 / fps),
+            'score': round(best_score, 3),
+            'note': 'Corrélation entre changements visuels et attaques sonores, PAS entre lèvres et paroles. Vérification manuelle indispensable.'}
+
+
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('AudioSync Batch • V4 - Correction par saison')
+        root.title('AudioSync Batch • V5 - Analyse expérimentale')
         root.geometry('1120x820')
         root.minsize(780, 610)
         self.files = []
@@ -185,6 +261,8 @@ class App:
         self.status = tk.StringVar(value='Ajoutez des vidéos pour consulter leurs pistes.')
         self.diagnostic = tk.StringVar(value='Sélectionnez un fichier ou lancez Analyser tout le dossier.')
         self.preview_start = tk.StringVar(value='30')
+        self.av_hint = None
+        self.av_hint_path = None
         self.build_ui()
         root.after(100, self.poll)
 
@@ -205,7 +283,7 @@ class App:
         style.configure('Treeview.Heading', font=('Segoe UI', 10, 'bold'))
         main = ttk.Frame(self.root, padding=14)
         main.pack(fill='both', expand=True)
-        ttk.Label(main, text='◉ AudioSync Batch V4', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(main, text='◉ AudioSync Batch V5', style='Title.TLabel').pack(anchor='w')
         ttk.Label(main, text='Analyse des pistes • Décalage en lot • Copie sans réencodage • Originaux préservés').pack(anchor='w', pady=(0, 8))
         bar = ttk.Frame(main)
         bar.pack(fill='x')
@@ -214,6 +292,8 @@ class App:
         ttk.Button(bar, text='Vider', command=self.clear).pack(side='left')
         self.scan_btn = ttk.Button(bar, text='Analyser toutes les vidéos', command=self.scan_all)
         self.scan_btn.pack(side='left', padx=8)
+        self.av_btn = ttk.Button(bar, text='Estimer décalage image/son', command=self.scan_av)
+        self.av_btn.pack(side='left', padx=4)
         ttk.Button(bar, text='Exporter le rapport CSV', command=self.export_report).pack(side='left')
         ttk.Checkbutton(bar, text='Sous-dossiers', variable=self.recursive).pack(side='right')
         ttk.Label(main, text='Fichiers source').pack(anchor='w', pady=(12, 3))
@@ -249,6 +329,12 @@ class App:
         self.tracks.configure(yscrollcommand=sb2.set)
         self.tracks.bind('<Double-1>', self.toggle_track)
         ttk.Label(main, textvariable=self.diagnostic, wraplength=980).pack(anchor='w', pady=(8, 6))
+        av_row = ttk.Frame(main)
+        av_row.pack(fill='x', pady=(0, 5))
+        self.av_description = tk.StringVar(value='V5 : sélectionnez un épisode puis lancez une estimation expérimentale (non labiale).')
+        ttk.Label(av_row, textvariable=self.av_description, wraplength=850).pack(side='left', fill='x', expand=True)
+        self.apply_hint_btn = ttk.Button(av_row, text='Copier la suggestion', command=self.copy_av_hint, state='disabled')
+        self.apply_hint_btn.pack(side='right', padx=4)
         seasonbar = ttk.Frame(main)
         seasonbar.pack(fill='x', pady=(4, 2))
         ttk.Label(seasonbar, text='Saison à traiter :').pack(side='left')
@@ -283,7 +369,7 @@ class App:
         self.progress = ttk.Progressbar(main, mode='determinate')
         self.progress.pack(fill='x', pady=(4, 4))
         ttk.Label(main, textvariable=self.status, wraplength=970).pack(anchor='w')
-        ttk.Label(main, text='V4 : décalage +8,7 s validé pour S01 seulement. Les saisons non mesurées ne sont jamais corrigées automatiquement. Un test de lecture reste nécessaire.',
+        ttk.Label(main, text='V5 : l’analyse des variations image/son donne au mieux une piste incertaine, pas une vraie synchronisation labiale. Ne jamais corriger un lot sans vérifier un extrait.',
                   wraplength=970).pack(anchor='w', pady=(5, 0))
 
     def update_seasons(self):
@@ -356,6 +442,9 @@ class App:
         self.files.clear()
         self.infos.clear()
         self.reports.clear()
+        self.av_hint = None
+        self.av_hint_path = None
+        self.apply_hint_btn.configure(state='disabled')
         self.enabled.clear()
         self.files_view.delete(*self.files_view.get_children())
         self.tracks.delete(*self.tracks.get_children())
@@ -377,6 +466,10 @@ class App:
         if not p:
             return
         self.tracks.delete(*self.tracks.get_children())
+        self.av_hint = None
+        self.av_hint_path = None
+        self.apply_hint_btn.configure(state='disabled')
+        self.av_description.set('Estimation non lancée pour cet épisode.')
         if str(p) in self.infos:
             self.populate_tracks(str(p))
         else:
@@ -445,11 +538,50 @@ class App:
             self.events.put(('progress', index))
         self.events.put(('scan_done', 'Analyse terminée. Les anomalies détectées sont des indices, pas une preuve de synchronisation.'))
 
+    def scan_av(self):
+        if self.busy:
+            return
+        path = self.selected_file()
+        if not path:
+            messagebox.showinfo('Épisode', 'Sélectionnez un épisode dans la liste.')
+            return
+        if not binary('ffmpeg'):
+            messagebox.showerror('FFmpeg absent', 'FFmpeg est nécessaire pour analyser image et son.')
+            return
+        self.busy = True
+        self.av_hint = None
+        self.av_hint_path = None
+        self.av_btn.configure(state='disabled')
+        self.apply_hint_btn.configure(state='disabled')
+        self.av_description.set('Analyse audiovisuelle en cours (début et deux moitiés de la séquence)…')
+        threading.Thread(target=self.av_worker, args=(str(path),), daemon=True).start()
+
+    def av_worker(self, path):
+        try:
+            info = self.infos.get(path) or probe(path)
+            duration = float(info.get('format', {}).get('duration', 0))
+            start = 15.0 if duration > 125 else 0.0
+            span = min(90., max(0., duration - start - 1.))
+            hint = experimental_av_hint(path, start=start, duration=span)
+            self.events.put(('av_result', (path, hint)))
+        except Exception as exc:
+            self.events.put(('av_error', str(exc)))
+
+    def copy_av_hint(self):
+        if not self.av_hint or self.av_hint_path != str(self.selected_file()):
+            return
+        ms = self.av_hint.get('offset_ms')
+        if ms is None:
+            return
+        self.offset.set(str(abs(ms)))
+        self.direction.set('delay' if ms >= 0 else 'advance')
+        self.season_status.set(f'Suggestion expérimentale {ms:+d} ms copiée pour essai. NON enregistrée pour la saison. Vérifiez un extrait.')
+
     def export_report(self):
         if not self.reports:
             messagebox.showinfo('Rapport vide', 'Lancez « Analyser toutes les vidéos » avant export.')
             return
-        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')], initialfile='audiosync_diagnostic_v4.csv')
+        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')], initialfile='audiosync_diagnostic_v5.csv')
         if not path:
             return
         fields = ['name', 'path', 'status', 'confidence', 'suggestion_ms', 'difference_s',
@@ -536,6 +668,7 @@ class App:
         self.test_btn.configure(state='disabled')
         self.cancel_btn.configure(state='normal')
         self.scan_btn.configure(state='disabled')
+        self.av_btn.configure(state='disabled')
         threading.Thread(target=self.worker, args=(files, offset, preview, start), daemon=True).start()
 
     def cancel(self):
@@ -618,7 +751,27 @@ class App:
                     self.busy = False
                     self.status.set(value)
                     self.scan_btn.configure(state='normal')
+                    self.av_btn.configure(state='normal')
                     self.cancel_btn.configure(state='disabled')
+                elif kind == 'av_result':
+                    path, hint = value
+                    self.busy = False
+                    self.av_btn.configure(state='normal')
+                    if str(self.selected_file()) == path:
+                        ms = hint.get('offset_ms')
+                        self.av_hint = hint
+                        self.av_hint_path = path
+                        if ms is None:
+                            self.av_description.set('Aucune estimation fiable : ' + hint['note'])
+                        else:
+                            self.av_description.set(f'Piste expérimentale {ms:+d} ms (score {hint["score"]:.2f}) — {hint["note"]}')
+                            self.apply_hint_btn.configure(state='normal')
+                    self.status.set('Analyse image/son terminée ; aucune correction appliquée.')
+                elif kind == 'av_error':
+                    self.busy = False
+                    self.av_btn.configure(state='normal')
+                    self.av_description.set('Analyse impossible : ' + value)
+                    self.status.set('Échec analyse audiovisuelle : ' + value)
                 elif kind == 'probe':
                     path, info, error = value
                     if error:
@@ -634,6 +787,7 @@ class App:
                     self.test_btn.configure(state='normal')
                     self.cancel_btn.configure(state='disabled')
                     self.scan_btn.configure(state='normal')
+                    self.av_btn.configure(state='normal')
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
